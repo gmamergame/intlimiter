@@ -1,0 +1,7 @@
+Origin: intlimiter
+Label: intlimiter
+Suite: stable
+Codename: stable
+Architectures: all
+Components: main
+Description: APT repository for intlimiter
