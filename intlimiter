@@ -3,10 +3,12 @@
 set -euo pipefail
 
 IFB_DEV="ifb$$"
+STATE_FILE="/var/run/intlimiter.state"
 
 usage() {
     echo "Usage: intlimiter --down|--up --mbit|--mbyte <number> [--interface <iface>]"
     echo "       intlimiter --clear [--interface <iface>]"
+    echo "       intlimiter --status"
     echo ""
     echo "Options:"
     echo "  --down       Limit download speed"
@@ -15,6 +17,7 @@ usage() {
     echo "  --mbyte      Speed in megabytes per second"
     echo "  --interface  Network interface (default: auto-detect)"
     echo "  --clear      Remove speed limits"
+    echo "  --status     Show current limits and qdiscs"
     exit 0
 }
 
@@ -52,6 +55,65 @@ convert_to_mbit() {
     fi
 }
 
+save_state() {
+    local iface=$1
+    local direction=$2
+    local speed=$3
+    local unit=$4
+    local rate_mbit=$5
+
+    cat > "$STATE_FILE" <<EOF
+INTERFACE=$iface
+DIRECTION=$direction
+SPEED=$speed
+UNIT=$unit
+RATE_MBIT=$rate_mbit
+IFB_DEV=$IFB_DEV
+EOF
+}
+
+load_state() {
+    if [[ ! -f "$STATE_FILE" ]]; then
+        return 1
+    fi
+    source "$STATE_FILE"
+}
+
+clear_state() {
+    rm -f "$STATE_FILE" 2>/dev/null || true
+}
+
+show_status() {
+    echo "=== intlimiter status ==="
+
+    if ! load_state; then
+        echo "No active limits found."
+        echo ""
+        echo "=== Applied qdiscs ==="
+        echo "(none)"
+        return
+    fi
+
+    echo "Interface: ${INTERFACE:-unknown}"
+    echo "Direction: ${DIRECTION:-unknown}"
+    echo "Speed: ${SPEED:-unknown} ${UNIT:-unknown}"
+    echo "Rate (mbit): ${RATE_MBIT:-unknown}"
+    echo "IFB device: ${IFB_DEV:-none}"
+    echo ""
+
+    echo "=== Applied qdiscs ==="
+    if [[ -n "$INTERFACE" ]]; then
+        echo "Interface: $INTERFACE"
+        sudo tc qdisc show dev "$INTERFACE" 2>/dev/null | head -5 || echo "  (none)"
+    fi
+
+    if [[ "$DIRECTION" == "down" ]] && [[ -n "$IFB_DEV" ]]; then
+        echo ""
+        echo "IFB device: $IFB_DEV"
+        sudo tc qdisc show dev "$IFB_DEV" 2>/dev/null | head -5 || echo "  (none)"
+    fi
+}
+
 clear_limits() {
     local iface=$1
     echo "Clearing speed limits on $iface..."
@@ -64,6 +126,7 @@ clear_limits() {
     sudo tc qdisc del dev "$iface" ingress 2>/dev/null || true
     sudo tc qdisc del dev "$iface" root 2>/dev/null || true
 
+    clear_state
     echo "Limits cleared."
 }
 
@@ -102,6 +165,7 @@ set_download_limit() {
         die "Failed to set rate limit"
     sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 2>/dev/null || true
 
+    save_state "$iface" "down" "$speed" "$unit" "$rate_mbit"
     echo "Download limit set to $speed $unit ($rate_mbit mbit)"
 }
 
@@ -122,6 +186,7 @@ set_upload_limit() {
         die "Failed to set rate limit"
     sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 2>/dev/null || true
 
+    save_state "$iface" "up" "$speed" "$unit" "$rate_mbit"
     echo "Upload limit set to $speed $unit ($rate_mbit mbit)"
 }
 
@@ -130,6 +195,7 @@ UNIT=""
 SPEED=""
 INTERFACE=""
 CLEAR=0
+STATUS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -165,7 +231,15 @@ while [[ $# -gt 0 ]]; do
             [[ -n "$DIRECTION" ]] && die "Cannot use --clear with --down or --up"
             [[ -n "$UNIT" ]] && die "Cannot use --clear with --mbit or --mbyte"
             [[ -n "$SPEED" ]] && die "Cannot use --clear with a speed value"
+            [[ "$STATUS" -eq 1 ]] && die "Cannot use --clear with --status"
             CLEAR=1
+            ;;
+        --status)
+            [[ "$CLEAR" -eq 1 ]] && die "Cannot use --status with --clear"
+            [[ -n "$DIRECTION" ]] && die "Cannot use --status with --down or --up"
+            [[ -n "$UNIT" ]] && die "Cannot use --status with --mbit or --mbyte"
+            [[ -n "$SPEED" ]] && die "Cannot use --status with a speed value"
+            STATUS=1
             ;;
         --help|-h)
             usage
@@ -181,6 +255,11 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ "$STATUS" -eq 1 ]]; then
+    show_status
+    exit 0
+fi
 
 if [[ -z "$INTERFACE" ]]; then
     INTERFACE=$(get_interface) || die "Failed to detect network interface"
