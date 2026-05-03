@@ -35,6 +35,9 @@ intlimiter --down --mbit 50 --interface eth0
 
 # Clear all limits
 intlimiter --clear
+
+# Show current limits and applied qdiscs
+intlimiter --status
 ```
 
 ## Options
@@ -47,6 +50,7 @@ intlimiter --clear
 | `--mbyte` | Speed in megabytes per second |
 | `--interface <iface>` | Network interface (default: auto-detect) |
 | `--clear` | Remove all speed limits |
+| `--status` | Show current limits and applied qdiscs |
 | `-h, --help` | Show help message |
 
 ## How it works
