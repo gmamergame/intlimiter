@@ -3,10 +3,46 @@
 set -euo pipefail
 
 IFB_DEV="ifb$$"
+STATE_FILE="/var/run/intlimiter.state"
+DEBUG=0
+
+debug() {
+    [[ "$DEBUG" -eq 1 ]] && echo "[DEBUG] $*" >&2
+}
+
+log_error() {
+    echo "Error: $*" >&2
+}
+
+run() {
+    local cmd="$*"
+    debug "Executing: $cmd"
+    if [[ "$DEBUG" -eq 1 ]]; then
+        eval "$cmd"
+    else
+        eval "$cmd" 2>&1 || {
+            local exit_code=$?
+            log_error "Command failed: $cmd"
+            return $exit_code
+        }
+    fi
+}
+
+run_quiet() {
+    local cmd="$*"
+    debug "Executing: $cmd"
+    eval "$cmd" 2>&1 || {
+        local exit_code=$?
+        debug "Command failed (exit $exit_code): $cmd"
+        return $exit_code
+    }
+}
 
 usage() {
     echo "Usage: intlimiter --down|--up --mbit|--mbyte <number> [--interface <iface>]"
     echo "       intlimiter --clear [--interface <iface>]"
+    echo "       intlimiter --status"
+    echo "       intlimiter --debug --down --mbit 50"
     echo ""
     echo "Options:"
     echo "  --down       Limit download speed"
@@ -15,6 +51,8 @@ usage() {
     echo "  --mbyte      Speed in megabytes per second"
     echo "  --interface  Network interface (default: auto-detect)"
     echo "  --clear      Remove speed limits"
+    echo "  --status     Show current limits and qdiscs"
+    echo "  --debug      Enable debug output"
     exit 0
 }
 
@@ -52,19 +90,140 @@ convert_to_mbit() {
     fi
 }
 
+save_state() {
+    local iface=$1
+    local direction=$2
+    local speed=$3
+    local unit=$4
+    local rate_mbit=$5
+
+    cat > "$STATE_FILE" <<EOF
+INTERFACE=$iface
+DIRECTION=$direction
+SPEED=$speed
+UNIT=$unit
+RATE_MBIT=$rate_mbit
+IFB_DEV=$IFB_DEV
+EOF
+}
+
+load_state() {
+    if [[ ! -f "$STATE_FILE" ]]; then
+        return 1
+    fi
+    source "$STATE_FILE"
+}
+
+clear_state() {
+    rm -f "$STATE_FILE" 2>/dev/null || true
+}
+
+teardown_ifb() {
+    local ifb_dev=$1
+    debug "Tearing down IFB: $ifb_dev"
+    if [[ -n "$ifb_dev" ]] && ip link show "$ifb_dev" &>/dev/null; then
+        run_quiet sudo ip link set "$ifb_dev" down
+        run_quiet sudo ip link del "$ifb_dev" type ifb
+    fi
+}
+
+teardown_interface() {
+    local iface=$1
+    debug "Tearing down interface qdiscs: $iface"
+    run_quiet sudo tc qdisc del dev "$iface" ingress
+    run_quiet sudo tc qdisc del dev "$iface" root
+}
+
+ensure_clean_state() {
+    local new_direction=$1
+
+    if ! load_state; then
+        return 0
+    fi
+
+    debug "Found existing state: direction=$DIRECTION, new=$new_direction"
+
+    if [[ "$DIRECTION" == "down" ]]; then
+        teardown_ifb "$IFB_DEV"
+    fi
+
+    if [[ "$DIRECTION" != "$new_direction" ]]; then
+        teardown_interface "$INTERFACE"
+    fi
+}
+
+show_status() {
+    echo "=== intlimiter status ==="
+
+    if ! load_state; then
+        echo "No active limits found."
+        echo ""
+        echo "=== Applied qdiscs ==="
+        echo "(none)"
+        return
+    fi
+
+    echo "Interface: ${INTERFACE:-unknown}"
+    echo "Direction: ${DIRECTION:-unknown}"
+    echo "Speed: ${SPEED:-unknown} ${UNIT:-unknown}"
+    echo "Rate (mbit): ${RATE_MBIT:-unknown}"
+    echo "IFB device: ${IFB_DEV:-none}"
+    echo ""
+
+    echo "=== Applied qdiscs ==="
+    if [[ -n "$INTERFACE" ]]; then
+        echo "Interface: $INTERFACE"
+        sudo tc qdisc show dev "$INTERFACE" 2>&1 | head -5 || echo "  (none)"
+    fi
+
+    if [[ "$DIRECTION" == "down" ]] && [[ -n "$IFB_DEV" ]]; then
+        echo ""
+        echo "IFB device: $IFB_DEV"
+        sudo tc qdisc show dev "$IFB_DEV" 2>&1 | head -5 || echo "  (none)"
+    fi
+}
+
 clear_limits() {
     local iface=$1
     echo "Clearing speed limits on $iface..."
 
-    if ip link show "$IFB_DEV" &>/dev/null; then
-        sudo ip link set "$IFB_DEV" down 2>/dev/null || true
-        sudo ip link del "$IFB_DEV" type ifb 2>/dev/null || true
+    if load_state; then
+        if [[ "$DIRECTION" == "down" ]]; then
+            teardown_ifb "$IFB_DEV"
+        fi
+        teardown_interface "$iface"
     fi
 
-    sudo tc qdisc del dev "$iface" ingress 2>/dev/null || true
-    sudo tc qdisc del dev "$iface" root 2>/dev/null || true
-
+    clear_state
     echo "Limits cleared."
+}
+
+setup_ifb() {
+    local ifb_dev=$1
+
+    run sudo modprobe ifb || die "Failed to load ifb module"
+
+    if ! ip link show "$ifb_dev" &>/dev/null; then
+        run sudo ip link add "$ifb_dev" type ifb || die "Failed to create $ifb_dev"
+    fi
+    run sudo ip link set "$ifb_dev" up || die "Failed to bring up $ifb_dev"
+}
+
+setup_interface() {
+    local iface=$1
+    local direction=$2
+
+    run_quiet sudo tc qdisc del dev "$iface" root 2>/dev/null || true
+    run sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc on $iface"
+
+    if [[ "$direction" == "up" ]]; then
+        return 0
+    fi
+
+    run_quiet sudo tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null || true
+    run sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
+        match u32 0 0 action mirred egress redirect dev "$IFB_DEV" || \
+        die "Failed to redirect ingress traffic to IFB"
 }
 
 set_download_limit() {
@@ -77,31 +236,19 @@ set_download_limit() {
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
-    cleanup() {
-        sudo ip link set "$IFB_DEV" down 2>/dev/null || true
-        sudo ip link del "$IFB_DEV" type ifb 2>/dev/null || true
-    }
-    trap cleanup EXIT
+    ensure_clean_state "down"
 
-    sudo modprobe ifb 2>/dev/null || die "Failed to load ifb module"
+    setup_ifb "$IFB_DEV"
+    setup_interface "$iface" "down"
 
-    if ! ip link show "$IFB_DEV" &>/dev/null; then
-        sudo ip link add "$IFB_DEV" type ifb || die "Failed to create $IFB_DEV"
-    fi
-    sudo ip link set "$IFB_DEV" up || die "Failed to bring up $IFB_DEV"
+    run_quiet sudo tc qdisc del dev "$IFB_DEV" root
+    run sudo tc qdisc add dev "$IFB_DEV" root handle 1: htb || die "Failed to add qdisc on $IFB_DEV"
+    run sudo tc class add dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        run sudo tc class replace dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        die "Failed to set rate limit on IFB"
+    run_quiet sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1
 
-    sudo tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null || true
-    sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
-        match u32 0 0 action mirred egress redirect dev "$IFB_DEV" 2>/dev/null || \
-        die "Failed to redirect ingress traffic"
-
-    sudo tc qdisc del dev "$IFB_DEV" root 2>/dev/null || true
-    sudo tc qdisc add dev "$IFB_DEV" root handle 1: htb || die "Failed to add qdisc on $IFB_DEV"
-    sudo tc class add dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" 2>/dev/null || \
-        sudo tc class replace dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
-        die "Failed to set rate limit"
-    sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 2>/dev/null || true
-
+    save_state "$iface" "down" "$speed" "$unit" "$rate_mbit"
     echo "Download limit set to $speed $unit ($rate_mbit mbit)"
 }
 
@@ -115,13 +262,16 @@ set_upload_limit() {
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
-    sudo tc qdisc del dev "$iface" root 2>/dev/null || true
-    sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc"
-    sudo tc class add dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" 2>/dev/null || \
-        sudo tc class replace dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
-        die "Failed to set rate limit"
-    sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 2>/dev/null || true
+    ensure_clean_state "up"
 
+    setup_interface "$iface" "up"
+
+    run sudo tc class add dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        run sudo tc class replace dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        die "Failed to set rate limit on $iface"
+    run_quiet sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1
+
+    save_state "$iface" "up" "$speed" "$unit" "$rate_mbit"
     echo "Upload limit set to $speed $unit ($rate_mbit mbit)"
 }
 
@@ -130,65 +280,75 @@ UNIT=""
 SPEED=""
 INTERFACE=""
 CLEAR=0
+STATUS=0
+DEBUG=0
 
-while getopts "h-:" opt; do
-    case "$opt" in
-        h)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --down)
+            [[ -n "$DIRECTION" ]] && die "Direction already specified (--down or --up)"
+            [[ -n "$SPEED" ]] && die "Speed must come after --mbit or --mbyte"
+            [[ -n "$UNIT" ]] && die "Unit already specified (--mbit or --mbyte)"
+            DIRECTION="down"
+            ;;
+        --up)
+            [[ -n "$DIRECTION" ]] && die "Direction already specified (--down or --up)"
+            [[ -n "$SPEED" ]] && die "Speed must come after --mbit or --mbyte"
+            [[ -n "$UNIT" ]] && die "Unit already specified (--mbit or --mbyte)"
+            DIRECTION="up"
+            ;;
+        --mbit)
+            [[ -n "$UNIT" ]] && die "Unit already specified (--mbit or --mbyte)"
+            [[ -z "$DIRECTION" ]] && die "Direction (--down or --up) must come before --mbit"
+            UNIT="mbit"
+            ;;
+        --mbyte)
+            [[ -n "$UNIT" ]] && die "Unit already specified (--mbit or --mbyte)"
+            [[ -z "$DIRECTION" ]] && die "Direction (--down or --up) must come before --mbyte"
+            UNIT="mbyte"
+            ;;
+        --interface)
+            [[ -z "${2:-}" ]] && die "Option --interface requires a value"
+            [[ "$2" == -* ]] && die "Option --interface requires a value"
+            INTERFACE="$2"
+            shift
+            ;;
+        --clear)
+            [[ -n "$DIRECTION" ]] && die "Cannot use --clear with --down or --up"
+            [[ -n "$UNIT" ]] && die "Cannot use --clear with --mbit or --mbyte"
+            [[ -n "$SPEED" ]] && die "Cannot use --clear with a speed value"
+            [[ "$STATUS" -eq 1 ]] && die "Cannot use --clear with --status"
+            CLEAR=1
+            ;;
+        --status)
+            [[ "$CLEAR" -eq 1 ]] && die "Cannot use --status with --clear"
+            [[ -n "$DIRECTION" ]] && die "Cannot use --status with --down or --up"
+            [[ -n "$UNIT" ]] && die "Cannot use --status with --mbit or --mbyte"
+            [[ -n "$SPEED" ]] && die "Cannot use --status with a speed value"
+            STATUS=1
+            ;;
+        --help|-h)
             usage
             ;;
-        -)
-            case "$OPTARG" in
-                down)
-                    DIRECTION="down"
-                    ;;
-                up)
-                    DIRECTION="up"
-                    ;;
-                mbit)
-                    UNIT="mbit"
-                    ;;
-                mbyte)
-                    UNIT="mbyte"
-                    ;;
-                clear)
-                    CLEAR=1
-                    ;;
-                interface)
-                    INTERFACE="${!OPTIND}"
-                    if [[ -z "$INTERFACE" ]] || [[ "$INTERFACE" == -* ]]; then
-                        die "Option --interface requires a value"
-                    fi
-                    ((OPTIND++))
-                    ;;
-                help)
-                    usage
-                    ;;
-                *)
-                    die "Unknown option: --$OPTARG"
-                    ;;
-            esac
+        --debug)
+            DEBUG=1
+            ;;
+        -*)
+            die "Unknown option: $1"
             ;;
         *)
-            die "Invalid option"
+            [[ -n "$SPEED" ]] && die "Multiple speed values provided"
+            [[ -z "$UNIT" ]] && die "Speed must come after --mbit or --mbyte"
+            SPEED="$1"
             ;;
     esac
+    shift
 done
 
-if [[ -z "${1:-}" ]]; then
-    usage
+if [[ "$STATUS" -eq 1 ]]; then
+    show_status
+    exit 0
 fi
-
-for arg in "$@"; do
-    case "$arg" in
-        --down|--up|--mbit|--mbyte|--clear|--interface|-h|--help)
-            ;;
-        *)
-            if [[ -z "$SPEED" ]]; then
-                SPEED="$arg"
-            fi
-            ;;
-    esac
-done
 
 if [[ -z "$INTERFACE" ]]; then
     INTERFACE=$(get_interface) || die "Failed to detect network interface"
