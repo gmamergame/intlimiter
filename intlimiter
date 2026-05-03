@@ -118,6 +118,22 @@ clear_state() {
     rm -f "$STATE_FILE" 2>/dev/null || true
 }
 
+teardown_ifb() {
+    local ifb_dev=$1
+    debug "Tearing down IFB: $ifb_dev"
+    if [[ -n "$ifb_dev" ]] && ip link show "$ifb_dev" &>/dev/null; then
+        run_quiet sudo ip link set "$ifb_dev" down
+        run_quiet sudo ip link del "$ifb_dev" type ifb
+    fi
+}
+
+teardown_interface() {
+    local iface=$1
+    debug "Tearing down interface qdiscs: $iface"
+    run_quiet sudo tc qdisc del dev "$iface" ingress
+    run_quiet sudo tc qdisc del dev "$iface" root
+}
+
 show_status() {
     echo "=== intlimiter status ==="
 
@@ -153,18 +169,43 @@ clear_limits() {
     local iface=$1
     echo "Clearing speed limits on $iface..."
 
-    if load_state && [[ "$DIRECTION" == "down" ]]; then
-        if ip link show "$IFB_DEV" &>/dev/null; then
-            run_quiet sudo ip link set "$IFB_DEV" down
-            run_quiet sudo ip link del "$IFB_DEV" type ifb
+    if load_state; then
+        if [[ "$DIRECTION" == "down" ]]; then
+            teardown_ifb "$IFB_DEV"
         fi
+        teardown_interface "$iface"
     fi
-
-    run_quiet sudo tc qdisc del dev "$iface" ingress
-    run_quiet sudo tc qdisc del dev "$iface" root
 
     clear_state
     echo "Limits cleared."
+}
+
+setup_ifb() {
+    local ifb_dev=$1
+
+    run sudo modprobe ifb || die "Failed to load ifb module"
+
+    if ! ip link show "$ifb_dev" &>/dev/null; then
+        run sudo ip link add "$ifb_dev" type ifb || die "Failed to create $ifb_dev"
+    fi
+    run sudo ip link set "$ifb_dev" up || die "Failed to bring up $ifb_dev"
+}
+
+setup_interface() {
+    local iface=$1
+    local direction=$2
+
+    run_quiet sudo tc qdisc del dev "$iface" root 2>/dev/null || true
+    run sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc on $iface"
+
+    if [[ "$direction" == "up" ]]; then
+        return 0
+    fi
+
+    run_quiet sudo tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null || true
+    run sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
+        match u32 0 0 action mirred egress redirect dev "$IFB_DEV" || \
+        die "Failed to redirect ingress traffic to IFB"
 }
 
 set_download_limit() {
@@ -178,24 +219,11 @@ set_download_limit() {
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
     if load_state && [[ "$DIRECTION" == "down" ]]; then
-        local old_ifb="${IFB_DEV:-}"
-        if [[ -n "$old_ifb" ]] && ip link show "$old_ifb" &>/dev/null; then
-            run_quiet sudo ip link set "$old_ifb" down
-            run_quiet sudo ip link del "$old_ifb" type ifb
-        fi
+        teardown_ifb "$IFB_DEV"
     fi
 
-    run sudo modprobe ifb || die "Failed to load ifb module"
-
-    if ! ip link show "$IFB_DEV" &>/dev/null; then
-        run sudo ip link add "$IFB_DEV" type ifb || die "Failed to create $IFB_DEV"
-    fi
-    run sudo ip link set "$IFB_DEV" up || die "Failed to bring up $IFB_DEV"
-
-    run_quiet sudo tc qdisc add dev "$iface" handle ffff: ingress
-    run sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
-        match u32 0 0 action mirred egress redirect dev "$IFB_DEV" || \
-        die "Failed to redirect ingress traffic to IFB"
+    setup_ifb "$IFB_DEV"
+    setup_interface "$iface" "down"
 
     run_quiet sudo tc qdisc del dev "$IFB_DEV" root
     run sudo tc qdisc add dev "$IFB_DEV" root handle 1: htb || die "Failed to add qdisc on $IFB_DEV"
@@ -218,8 +246,8 @@ set_upload_limit() {
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
-    run_quiet sudo tc qdisc del dev "$iface" root
-    run sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc on $iface"
+    setup_interface "$iface" "up"
+
     run sudo tc class add dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
         run sudo tc class replace dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
         die "Failed to set rate limit on $iface"
