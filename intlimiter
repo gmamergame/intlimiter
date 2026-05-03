@@ -131,63 +131,55 @@ SPEED=""
 INTERFACE=""
 CLEAR=0
 
-while getopts "h-:" opt; do
-    case "$opt" in
-        h)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --down)
+            [[ -n "$DIRECTION" ]] && die "Direction already specified (--down or --up)"
+            [[ -n "$SPEED" ]] && die "Speed must come after --mbit or --mbyte"
+            [[ -n "$UNIT" ]] && die "Unit already specified (--mbit or --mbyte)"
+            DIRECTION="down"
+            ;;
+        --up)
+            [[ -n "$DIRECTION" ]] && die "Direction already specified (--down or --up)"
+            [[ -n "$SPEED" ]] && die "Speed must come after --mbit or --mbyte"
+            [[ -n "$UNIT" ]] && die "Unit already specified (--mbit or --mbyte)"
+            DIRECTION="up"
+            ;;
+        --mbit)
+            [[ -n "$UNIT" ]] && die "Unit already specified (--mbit or --mbyte)"
+            [[ -z "$DIRECTION" ]] && die "Direction (--down or --up) must come before --mbit"
+            UNIT="mbit"
+            ;;
+        --mbyte)
+            [[ -n "$UNIT" ]] && die "Unit already specified (--mbit or --mbyte)"
+            [[ -z "$DIRECTION" ]] && die "Direction (--down or --up) must come before --mbyte"
+            UNIT="mbyte"
+            ;;
+        --interface)
+            [[ -z "${2:-}" ]] && die "Option --interface requires a value"
+            [[ "$2" == -* ]] && die "Option --interface requires a value"
+            INTERFACE="$2"
+            shift
+            ;;
+        --clear)
+            [[ -n "$DIRECTION" ]] && die "Cannot use --clear with --down or --up"
+            [[ -n "$UNIT" ]] && die "Cannot use --clear with --mbit or --mbyte"
+            [[ -n "$SPEED" ]] && die "Cannot use --clear with a speed value"
+            CLEAR=1
+            ;;
+        --help|-h)
             usage
             ;;
-        -)
-            case "$OPTARG" in
-                down)
-                    DIRECTION="down"
-                    ;;
-                up)
-                    DIRECTION="up"
-                    ;;
-                mbit)
-                    UNIT="mbit"
-                    ;;
-                mbyte)
-                    UNIT="mbyte"
-                    ;;
-                clear)
-                    CLEAR=1
-                    ;;
-                interface)
-                    INTERFACE="${!OPTIND}"
-                    if [[ -z "$INTERFACE" ]] || [[ "$INTERFACE" == -* ]]; then
-                        die "Option --interface requires a value"
-                    fi
-                    ((OPTIND++))
-                    ;;
-                help)
-                    usage
-                    ;;
-                *)
-                    die "Unknown option: --$OPTARG"
-                    ;;
-            esac
+        -*)
+            die "Unknown option: $1"
             ;;
         *)
-            die "Invalid option"
+            [[ -n "$SPEED" ]] && die "Multiple speed values provided"
+            [[ -z "$UNIT" ]] && die "Speed must come after --mbit or --mbyte"
+            SPEED="$1"
             ;;
     esac
-done
-
-if [[ -z "${1:-}" ]]; then
-    usage
-fi
-
-for arg in "$@"; do
-    case "$arg" in
-        --down|--up|--mbit|--mbyte|--clear|--interface|-h|--help)
-            ;;
-        *)
-            if [[ -z "$SPEED" ]]; then
-                SPEED="$arg"
-            fi
-            ;;
-    esac
+    shift
 done
 
 if [[ -z "$INTERFACE" ]]; then
