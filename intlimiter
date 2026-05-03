@@ -118,9 +118,11 @@ clear_limits() {
     local iface=$1
     echo "Clearing speed limits on $iface..."
 
-    if ip link show "$IFB_DEV" &>/dev/null; then
-        sudo ip link set "$IFB_DEV" down 2>/dev/null || true
-        sudo ip link del "$IFB_DEV" type ifb 2>/dev/null || true
+    if load_state && [[ "$DIRECTION" == "down" ]]; then
+        if ip link show "$IFB_DEV" &>/dev/null; then
+            sudo ip link set "$IFB_DEV" down 2>/dev/null || true
+            sudo ip link del "$IFB_DEV" type ifb 2>/dev/null || true
+        fi
     fi
 
     sudo tc qdisc del dev "$iface" ingress 2>/dev/null || true
@@ -140,11 +142,13 @@ set_download_limit() {
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
-    cleanup() {
-        sudo ip link set "$IFB_DEV" down 2>/dev/null || true
-        sudo ip link del "$IFB_DEV" type ifb 2>/dev/null || true
-    }
-    trap cleanup EXIT
+    if load_state && [[ "$DIRECTION" == "down" ]]; then
+        local old_ifb="${IFB_DEV:-}"
+        if [[ -n "$old_ifb" ]] && ip link show "$old_ifb" &>/dev/null; then
+            sudo ip link set "$old_ifb" down 2>/dev/null || true
+            sudo ip link del "$old_ifb" type ifb 2>/dev/null || true
+        fi
+    fi
 
     sudo modprobe ifb 2>/dev/null || die "Failed to load ifb module"
 
