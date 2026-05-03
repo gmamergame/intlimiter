@@ -134,6 +134,24 @@ teardown_interface() {
     run_quiet sudo tc qdisc del dev "$iface" root
 }
 
+ensure_clean_state() {
+    local new_direction=$1
+
+    if ! load_state; then
+        return 0
+    fi
+
+    debug "Found existing state: direction=$DIRECTION, new=$new_direction"
+
+    if [[ "$DIRECTION" == "down" ]]; then
+        teardown_ifb "$IFB_DEV"
+    fi
+
+    if [[ "$DIRECTION" != "$new_direction" ]]; then
+        teardown_interface "$INTERFACE"
+    fi
+}
+
 show_status() {
     echo "=== intlimiter status ==="
 
@@ -218,9 +236,7 @@ set_download_limit() {
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
-    if load_state && [[ "$DIRECTION" == "down" ]]; then
-        teardown_ifb "$IFB_DEV"
-    fi
+    ensure_clean_state "down"
 
     setup_ifb "$IFB_DEV"
     setup_interface "$iface" "down"
@@ -245,6 +261,8 @@ set_upload_limit() {
 
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
+
+    ensure_clean_state "up"
 
     setup_interface "$iface" "up"
 
