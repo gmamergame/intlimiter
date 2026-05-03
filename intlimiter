@@ -4,11 +4,45 @@ set -euo pipefail
 
 IFB_DEV="ifb$$"
 STATE_FILE="/var/run/intlimiter.state"
+DEBUG=0
+
+debug() {
+    [[ "$DEBUG" -eq 1 ]] && echo "[DEBUG] $*" >&2
+}
+
+log_error() {
+    echo "Error: $*" >&2
+}
+
+run() {
+    local cmd="$*"
+    debug "Executing: $cmd"
+    if [[ "$DEBUG" -eq 1 ]]; then
+        eval "$cmd"
+    else
+        eval "$cmd" 2>&1 || {
+            local exit_code=$?
+            log_error "Command failed: $cmd"
+            return $exit_code
+        }
+    fi
+}
+
+run_quiet() {
+    local cmd="$*"
+    debug "Executing: $cmd"
+    eval "$cmd" 2>&1 || {
+        local exit_code=$?
+        debug "Command failed (exit $exit_code): $cmd"
+        return $exit_code
+    }
+}
 
 usage() {
     echo "Usage: intlimiter --down|--up --mbit|--mbyte <number> [--interface <iface>]"
     echo "       intlimiter --clear [--interface <iface>]"
     echo "       intlimiter --status"
+    echo "       intlimiter --debug --down --mbit 50"
     echo ""
     echo "Options:"
     echo "  --down       Limit download speed"
@@ -18,6 +52,7 @@ usage() {
     echo "  --interface  Network interface (default: auto-detect)"
     echo "  --clear      Remove speed limits"
     echo "  --status     Show current limits and qdiscs"
+    echo "  --debug      Enable debug output"
     exit 0
 }
 
@@ -104,13 +139,13 @@ show_status() {
     echo "=== Applied qdiscs ==="
     if [[ -n "$INTERFACE" ]]; then
         echo "Interface: $INTERFACE"
-        sudo tc qdisc show dev "$INTERFACE" 2>/dev/null | head -5 || echo "  (none)"
+        sudo tc qdisc show dev "$INTERFACE" 2>&1 | head -5 || echo "  (none)"
     fi
 
     if [[ "$DIRECTION" == "down" ]] && [[ -n "$IFB_DEV" ]]; then
         echo ""
         echo "IFB device: $IFB_DEV"
-        sudo tc qdisc show dev "$IFB_DEV" 2>/dev/null | head -5 || echo "  (none)"
+        sudo tc qdisc show dev "$IFB_DEV" 2>&1 | head -5 || echo "  (none)"
     fi
 }
 
@@ -120,13 +155,13 @@ clear_limits() {
 
     if load_state && [[ "$DIRECTION" == "down" ]]; then
         if ip link show "$IFB_DEV" &>/dev/null; then
-            sudo ip link set "$IFB_DEV" down 2>/dev/null || true
-            sudo ip link del "$IFB_DEV" type ifb 2>/dev/null || true
+            run_quiet sudo ip link set "$IFB_DEV" down
+            run_quiet sudo ip link del "$IFB_DEV" type ifb
         fi
     fi
 
-    sudo tc qdisc del dev "$iface" ingress 2>/dev/null || true
-    sudo tc qdisc del dev "$iface" root 2>/dev/null || true
+    run_quiet sudo tc qdisc del dev "$iface" ingress
+    run_quiet sudo tc qdisc del dev "$iface" root
 
     clear_state
     echo "Limits cleared."
@@ -145,29 +180,29 @@ set_download_limit() {
     if load_state && [[ "$DIRECTION" == "down" ]]; then
         local old_ifb="${IFB_DEV:-}"
         if [[ -n "$old_ifb" ]] && ip link show "$old_ifb" &>/dev/null; then
-            sudo ip link set "$old_ifb" down 2>/dev/null || true
-            sudo ip link del "$old_ifb" type ifb 2>/dev/null || true
+            run_quiet sudo ip link set "$old_ifb" down
+            run_quiet sudo ip link del "$old_ifb" type ifb
         fi
     fi
 
-    sudo modprobe ifb 2>/dev/null || die "Failed to load ifb module"
+    run sudo modprobe ifb || die "Failed to load ifb module"
 
     if ! ip link show "$IFB_DEV" &>/dev/null; then
-        sudo ip link add "$IFB_DEV" type ifb || die "Failed to create $IFB_DEV"
+        run sudo ip link add "$IFB_DEV" type ifb || die "Failed to create $IFB_DEV"
     fi
-    sudo ip link set "$IFB_DEV" up || die "Failed to bring up $IFB_DEV"
+    run sudo ip link set "$IFB_DEV" up || die "Failed to bring up $IFB_DEV"
 
-    sudo tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null || true
-    sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
-        match u32 0 0 action mirred egress redirect dev "$IFB_DEV" 2>/dev/null || \
-        die "Failed to redirect ingress traffic"
+    run_quiet sudo tc qdisc add dev "$iface" handle ffff: ingress
+    run sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
+        match u32 0 0 action mirred egress redirect dev "$IFB_DEV" || \
+        die "Failed to redirect ingress traffic to IFB"
 
-    sudo tc qdisc del dev "$IFB_DEV" root 2>/dev/null || true
-    sudo tc qdisc add dev "$IFB_DEV" root handle 1: htb || die "Failed to add qdisc on $IFB_DEV"
-    sudo tc class add dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" 2>/dev/null || \
-        sudo tc class replace dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
-        die "Failed to set rate limit"
-    sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 2>/dev/null || true
+    run_quiet sudo tc qdisc del dev "$IFB_DEV" root
+    run sudo tc qdisc add dev "$IFB_DEV" root handle 1: htb || die "Failed to add qdisc on $IFB_DEV"
+    run sudo tc class add dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        run sudo tc class replace dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        die "Failed to set rate limit on IFB"
+    run_quiet sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1
 
     save_state "$iface" "down" "$speed" "$unit" "$rate_mbit"
     echo "Download limit set to $speed $unit ($rate_mbit mbit)"
@@ -183,12 +218,12 @@ set_upload_limit() {
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
-    sudo tc qdisc del dev "$iface" root 2>/dev/null || true
-    sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc"
-    sudo tc class add dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" 2>/dev/null || \
-        sudo tc class replace dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
-        die "Failed to set rate limit"
-    sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 2>/dev/null || true
+    run_quiet sudo tc qdisc del dev "$iface" root
+    run sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc on $iface"
+    run sudo tc class add dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        run sudo tc class replace dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        die "Failed to set rate limit on $iface"
+    run_quiet sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1
 
     save_state "$iface" "up" "$speed" "$unit" "$rate_mbit"
     echo "Upload limit set to $speed $unit ($rate_mbit mbit)"
@@ -200,6 +235,7 @@ SPEED=""
 INTERFACE=""
 CLEAR=0
 STATUS=0
+DEBUG=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -247,6 +283,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             usage
+            ;;
+        --debug)
+            DEBUG=1
             ;;
         -*)
             die "Unknown option: $1"
