@@ -1,0 +1,8 @@
+intlimiter (1.0.0) stable; urgency=medium
+
+  * Initial release
+  * Limit download/upload speeds independently
+  * Support for mbit and mbyte units
+  * Auto network interface detection
+
+ -- Milan Veenhoven <os@zoringroup.com>  Sat, 03 May 2026 12:00:00 +0000

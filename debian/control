@@ -1,0 +1,15 @@
+Source: intlimiter
+Section: net
+Priority: optional
+Maintainer: Milan Veenhoven <os@zoringroup.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Homepage: https://github.com/gmamergame/intlimiter
+
+Package: intlimiter
+Architecture: all
+Depends: iproute2, bc, sudo
+Description: Simple bandwidth limiter for Linux
+ A command-line tool to limit network interface bandwidth using Linux
+ traffic control (tc). Supports limiting download and upload speeds
+ independently, with automatic network interface detection.
