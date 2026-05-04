@@ -1,7 +1,7 @@
 Source: intlimiter
 Section: net
 Priority: optional
-Maintainer: Milan Veenhoven <os@zoringroup.com>
+Maintainer: Milan Veenhoven <milan@veenhoven.net>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.0
 Homepage: https://github.com/gmamergame/intlimiter

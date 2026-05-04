@@ -1,0 +1,95 @@
+.TH INTLIMITER "1" "May 2026" "intlimiter 1.2.0" "User Commands"
+.SH NAME
+intlimiter \- Simple bandwidth limiter for Linux
+.SH SYNOPSIS
+.B intlimiter
+[\fIOPTIONS\fR] [\fIspeed\fR]
+.SH DESCRIPTION
+intlimiter is a command-line tool to limit network interface bandwidth using Linux traffic control (tc). It supports limiting download and upload speeds independently.
+.SH OPTIONS
+.PP
+\fB\-\-down\fR
+.RS 4
+Limit download speed
+.RE
+.PP
+\fB\-\-up\fR
+.RS 4
+Limit upload speed
+.RE
+.PP
+\fB\-\-mbit\fR
+.RS 4
+Speed in megabits per second
+.RE
+.PP
+\fB\-\-mbyte\fR
+.RS 4
+Speed in megabytes per second
+.RE
+.PP
+\fB\-\-interface\fR \fIiface\fR
+.RS 4
+Network interface (default: auto-detect)
+.RE
+.PP
+\fB\-\-clear\fR
+.RS 4
+Remove all speed limits
+.RE
+.PP
+\fB\-\-status\fR
+.RS 4
+Show current limits and applied qdiscs
+.RE
+.PP
+\fB\-\-debug\fR
+.RS 4
+Enable debug output
+.RE
+.PP
+\fB\-\-dry\-run\fR
+.RS 4
+Show commands without executing
+.RE
+.PP
+\fB\-\-version\fR
+.RS 4
+Show version information
+.RE
+.PP
+\fB\-h\fR, \fB\-\-help\fR
+.RS 4
+Show help message
+.RE
+.SH EXAMPLES
+.PP
+Limit download to 50 megabits per second:
+.RS 4
+.nf
+intlimiter \-\-down \-\-mbit 50
+.fi
+.RE
+.PP
+Limit upload to 10 megabytes per second:
+.RS 4
+.nf
+intlimiter \-\-up \-\-mbyte 10
+.fi
+.RE
+.PP
+Clear all limits:
+.RS 4
+.nf
+intlimiter \-\-clear
+.fi
+.RE
+.SH REQUIREMENTS
+.PP
+Linux with tc and ip commands (part of iproute2), bc, and root privileges.
+.SH AUTHOR
+Written by Milan Veenhoven.
+.SH BUGS
+Report bugs at https://github.com/gmamergame/intlimiter/issues
+.SH LICENSE
+MIT License

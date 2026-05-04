@@ -2,9 +2,32 @@
 
 set -euo pipefail
 
-IFB_DEV="ifb$$"
+IFB_DEV="ifb-intlimiter"
 STATE_FILE="/var/run/intlimiter.state"
 DEBUG=0
+DRY_RUN=0
+
+VERSION="1.2.0"
+
+check_dependencies() {
+    local missing=()
+
+    for cmd in tc ip bc modprobe; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "Missing required dependencies: ${missing[*]}. Please install iproute2 (for tc, ip) and bc."
+    fi
+}
+
+acquire_lock() {
+    local lock_file="/var/run/intlimiter.lock"
+    exec 200>"$lock_file"
+    flock -n 200 || die "Another instance of intlimiter is already running"
+}
 
 debug() {
     [[ "$DEBUG" -eq 1 ]] && echo "[DEBUG] $*" >&2
@@ -17,12 +40,16 @@ log_error() {
 run() {
     local cmd="$*"
     debug "Executing: $cmd"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "[DRY-RUN] $cmd"
+        return 0
+    fi
     if [[ "$DEBUG" -eq 1 ]]; then
-        eval "$cmd"
+        "$cmd"
     else
-        eval "$cmd" 2>&1 || {
+        "$cmd" 2>&1 || {
             local exit_code=$?
-            log_error "Command failed: $cmd"
+            log_error "Command failed (exit $exit_code): $cmd"
             return $exit_code
         }
     fi
@@ -31,7 +58,11 @@ run() {
 run_quiet() {
     local cmd="$*"
     debug "Executing: $cmd"
-    eval "$cmd" 2>&1 || {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "[DRY-RUN] $cmd"
+        return 0
+    fi
+    "$cmd" 2>&1 || {
         local exit_code=$?
         debug "Command failed (exit $exit_code): $cmd"
         return $exit_code
@@ -97,6 +128,13 @@ save_state() {
     local unit=$4
     local rate_mbit=$5
 
+    local state_dir
+    state_dir=$(dirname "$STATE_FILE")
+
+    if [[ ! -d "$state_dir" ]]; then
+        mkdir -p "$state_dir"
+    fi
+
     cat > "$STATE_FILE" <<EOF
 INTERFACE=$iface
 DIRECTION=$direction
@@ -105,6 +143,8 @@ UNIT=$unit
 RATE_MBIT=$rate_mbit
 IFB_DEV=$IFB_DEV
 EOF
+
+    chmod 600 "$STATE_FILE"
 }
 
 load_state() {
@@ -156,20 +196,19 @@ show_status() {
     echo "=== intlimiter status ==="
 
     if ! load_state; then
-        echo "No active limits found."
+        echo "Status: INACTIVE"
         echo ""
-        echo "=== Applied qdiscs ==="
-        echo "(none)"
+        echo "No active limits found."
         return
     fi
 
+    echo "Status: ACTIVE"
     echo "Interface: ${INTERFACE:-unknown}"
     echo "Direction: ${DIRECTION:-unknown}"
     echo "Speed: ${SPEED:-unknown} ${UNIT:-unknown}"
     echo "Rate (mbit): ${RATE_MBIT:-unknown}"
     echo "IFB device: ${IFB_DEV:-none}"
     echo ""
-
     echo "=== Applied qdiscs ==="
     if [[ -n "$INTERFACE" ]]; then
         echo "Interface: $INTERFACE"
@@ -330,8 +369,15 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             usage
             ;;
+        --version)
+            echo "intlimiter version $VERSION"
+            exit 0
+            ;;
         --debug)
             DEBUG=1
+            ;;
+        --dry-run)
+            DRY_RUN=1
             ;;
         -*)
             die "Unknown option: $1"
@@ -344,6 +390,9 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+check_dependencies
+acquire_lock
 
 if [[ "$STATUS" -eq 1 ]]; then
     show_status

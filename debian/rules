@@ -5,3 +5,4 @@
 
 override_dh_install:
 	dh_install intlimiter usr/bin
+	dh_install intlimiter.1 usr/share/man/man1
