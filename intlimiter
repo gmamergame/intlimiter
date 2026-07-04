@@ -151,17 +151,42 @@ teardown_ifb() {
     local ifb_dev=$1
     debug "Tearing down IFB: $ifb_dev"
     if [[ -n "$ifb_dev" ]]; then
-        ip link show "$ifb_dev" >/dev/null 2>&1 || return 0
-        sudo ip link set "$ifb_dev" down 2>/dev/null || true
-        sudo ip link del "$ifb_dev" type ifb 2>/dev/null || true
+        if ! ip link show "$ifb_dev" >/dev/null 2>&1; then
+            debug "IFB $ifb_dev not present, skip teardown"
+            return 0
+        fi
+
+        local err=
+        if ! sudo ip link set "$ifb_dev" down 2>/dev/null; then
+            err="ip_link_down_failed"
+        fi
+
+        if ! sudo ip link del "$ifb_dev" type ifb 2>/dev/null; then
+            err="${err:+${err};}ip_link_del_failed"
+        fi
+
+        if [[ -n "$err" ]]; then
+            debug "IFB teardown warnings: $err"
+        fi
     fi
 }
 
 teardown_interface() {
     local iface=$1
     debug "Tearing down interface qdiscs: $iface"
-    sudo tc qdisc del dev "$iface" ingress 2>/dev/null || true
-    sudo tc qdisc del dev "$iface" root 2>/dev/null || true
+    local err=
+
+    if ! sudo tc qdisc del dev "$iface" ingress 2>/dev/null; then
+        err="ingress_qdisc_removal_failed"
+    fi
+
+    if ! sudo tc qdisc del dev "$iface" root 2>/dev/null; then
+        err="${err:+${err};}root_qdisc_removal_failed"
+    fi
+
+    if [[ -n "$err" ]]; then
+        debug "teardown warnings on $iface: $err"
+    fi
 }
 
 ensure_clean_state() {
