@@ -13,7 +13,8 @@ A simple command-line tool to limit network interface bandwidth using Linux traf
 ## Requirements
 
 - Linux with `tc` (traffic control) and `ip` commands
-- Root privileges (uses sudo)
+- `sudo`, `bc`
+- Root privileges for traffic control operations
 
 ## Installation
 
@@ -47,13 +48,13 @@ intlimiter --debug --down --mbit 50
 ## Options
 
 | Option | Description |
-|--------|-------------|
+| --- | --- |
 | `--down` | Limit download speed |
 | `--up` | Limit upload speed |
 | `--mbit` | Speed in megabits per second |
 | `--mbyte` | Speed in megabytes per second |
 | `--interface <iface>` | Network interface (default: auto-detect) |
-| `--clear` | Remove all speed limits |
+| `--clear` | Remove speed limits |
 | `--status` | Show current limits and applied qdiscs |
 | `--debug` | Enable debug output |
 | `-h, --help` | Show help message |
@@ -63,6 +64,25 @@ intlimiter --debug --down --mbit 50
 - Download limiting uses IFB (Intermediate Functional Block) to shape ingress traffic
 - Upload limiting uses HTB (Hierarchical Token Bucket) on egress
 - Requires root privileges for traffic control operations
+
+## State and Concurrency
+
+- Active limit state is stored in `/var/run/intlimiter.state`
+- State mutations are guarded by a filesystem lock at `/var/run/intlimiter.locks/state`
+- IFB device name is fixed as `ifb0` so apply and clear paths are deterministic
+- `--clear` directly tears down qdiscs and IFB state instead of relying only on parsed state
+
+## Development
+
+```bash
+bash -n intlimiter
+```
+
+This performs a syntax check on the main script.
+
+## Contributing
+
+Contributions are welcome via pull request or issue.
 
 ## License
 

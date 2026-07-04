@@ -2,9 +2,38 @@
 
 set -euo pipefail
 
-IFB_DEV="ifb$$"
+IFB_DEV="ifb0"
 STATE_FILE="/var/run/intlimiter.state"
+LOCK_DIR="/var/run/intlimiter.locks"
+STATE_FILE_LOCK="$LOCK_DIR/state"
 DEBUG=0
+
+acquire_state_lock() {
+    local delay=0.25
+    local attempts=20
+    local count=0
+
+    while (( count < attempts )); do
+        if mkdir "$STATE_FILE_LOCK" >/dev/null 2>&1; then
+            return 0
+        fi
+
+        sleep "$delay"
+        count=$(( count + 1 ))
+    done
+
+    die "Another intlimiter operation is in progress (lock dir: $STATE_FILE_LOCK)"
+}
+
+release_state_lock() {
+    rmdir "$STATE_FILE_LOCK" >/dev/null 2>&1 || true
+}
+
+state_lock() {
+    if [[ "${INTLIMITER_STATE_LOCK:-1}" != "0" ]]; then
+        acquire_state_lock
+    fi
+}
 
 debug() {
     [[ "$DEBUG" -eq 1 ]] && echo "[DEBUG] $*" >&2
@@ -14,28 +43,24 @@ log_error() {
     echo "Error: $*" >&2
 }
 
-run() {
-    local cmd="$*"
-    debug "Executing: $cmd"
-    if [[ "$DEBUG" -eq 1 ]]; then
-        eval "$cmd"
-    else
-        eval "$cmd" 2>&1 || {
-            local exit_code=$?
-            log_error "Command failed: $cmd"
-            return $exit_code
-        }
-    fi
+die() {
+    echo "Error: $*" >&2
+    exit 1
 }
 
-run_quiet() {
-    local cmd="$*"
-    debug "Executing: $cmd"
-    eval "$cmd" 2>&1 || {
-        local exit_code=$?
-        debug "Command failed (exit $exit_code): $cmd"
-        return $exit_code
-    }
+check_dependencies() {
+    local missing=()
+    local cmd
+
+    for cmd in ip tc bc sudo; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        die "Missing required commands: ${missing[*]}"
+    fi
 }
 
 usage() {
@@ -56,11 +81,6 @@ usage() {
     exit 0
 }
 
-die() {
-    echo "Error: $*" >&2
-    exit 1
-}
-
 validate_speed() {
     local speed=$1
     if ! [[ "$speed" =~ ^[0-9]+(\.[0-9]+)?$ ]] || (( $(echo "$speed <= 0" | bc -l) )); then
@@ -70,7 +90,7 @@ validate_speed() {
 
 validate_interface() {
     local iface=$1
-    if ! ip link show "$iface" &>/dev/null; then
+    if ! ip link show "$iface" >/dev/null 2>&1; then
         die "Interface '$iface' does not exist"
     fi
 }
@@ -97,21 +117,30 @@ save_state() {
     local unit=$4
     local rate_mbit=$5
 
-    cat > "$STATE_FILE" <<EOF
+    cat > "$STATE_FILE" <<STATE_EOF
 INTERFACE=$iface
 DIRECTION=$direction
 SPEED=$speed
 UNIT=$unit
 RATE_MBIT=$rate_mbit
 IFB_DEV=$IFB_DEV
-EOF
+STATE_EOF
 }
 
-load_state() {
+load_and_check_direction() {
     if [[ ! -f "$STATE_FILE" ]]; then
         return 1
     fi
+
+    set -a
     source "$STATE_FILE"
+    set +a
+
+    if [[ -z "${DIRECTION:-}" || -z "${INTERFACE:-}" ]]; then
+        return 1
+    fi
+
+    return 0
 }
 
 clear_state() {
@@ -121,41 +150,46 @@ clear_state() {
 teardown_ifb() {
     local ifb_dev=$1
     debug "Tearing down IFB: $ifb_dev"
-    if [[ -n "$ifb_dev" ]] && ip link show "$ifb_dev" &>/dev/null; then
-        run_quiet sudo ip link set "$ifb_dev" down
-        run_quiet sudo ip link del "$ifb_dev" type ifb
+    if [[ -n "$ifb_dev" ]]; then
+        ip link show "$ifb_dev" >/dev/null 2>&1 || return 0
+        sudo ip link set "$ifb_dev" down 2>/dev/null || true
+        sudo ip link del "$ifb_dev" type ifb 2>/dev/null || true
     fi
 }
 
 teardown_interface() {
     local iface=$1
     debug "Tearing down interface qdiscs: $iface"
-    run_quiet sudo tc qdisc del dev "$iface" ingress
-    run_quiet sudo tc qdisc del dev "$iface" root
+    sudo tc qdisc del dev "$iface" ingress 2>/dev/null || true
+    sudo tc qdisc del dev "$iface" root 2>/dev/null || true
 }
 
 ensure_clean_state() {
-    local new_direction=$1
-
-    if ! load_state; then
+    if ! load_and_check_direction; then
         return 0
     fi
 
-    debug "Found existing state: direction=$DIRECTION, new=$new_direction"
+    debug "Found existing state: interface=$INTERFACE, direction=$DIRECTION"
+    teardown_ifb "$IFB_DEV"
+    teardown_interface "$INTERFACE"
+}
 
-    if [[ "$DIRECTION" == "down" ]]; then
-        teardown_ifb "$IFB_DEV"
-    fi
+get_qdisc_line() {
+    local dev=$1
+    local line
 
-    if [[ "$DIRECTION" != "$new_direction" ]]; then
-        teardown_interface "$INTERFACE"
+    line=$(sudo tc qdisc show dev "$dev" 2>&1 | head -1 || true)
+    if [[ -z "$line" ]]; then
+        echo "(none)"
+    else
+        echo "$line"
     fi
 }
 
 show_status() {
     echo "=== intlimiter status ==="
 
-    if ! load_state; then
+    if ! load_and_check_direction; then
         echo "No active limits found."
         echo ""
         echo "=== Applied qdiscs ==="
@@ -163,23 +197,19 @@ show_status() {
         return
     fi
 
-    echo "Interface: ${INTERFACE:-unknown}"
-    echo "Direction: ${DIRECTION:-unknown}"
-    echo "Speed: ${SPEED:-unknown} ${UNIT:-unknown}"
-    echo "Rate (mbit): ${RATE_MBIT:-unknown}"
+    echo "Interface: ${INTERFACE}"
+    echo "Direction: ${DIRECTION}"
+    echo "Speed: ${SPEED} ${UNIT}"
+    echo "Rate (mbit): ${RATE_MBIT}"
     echo "IFB device: ${IFB_DEV:-none}"
     echo ""
 
     echo "=== Applied qdiscs ==="
-    if [[ -n "$INTERFACE" ]]; then
-        echo "Interface: $INTERFACE"
-        sudo tc qdisc show dev "$INTERFACE" 2>&1 | head -5 || echo "  (none)"
-    fi
+    echo "Interface $INTERFACE: $(get_qdisc_line "$INTERFACE")"
 
-    if [[ "$DIRECTION" == "down" ]] && [[ -n "$IFB_DEV" ]]; then
+    if [[ "${DIRECTION:-}" == "down" ]] && [[ -n "${IFB_DEV:-}" ]]; then
         echo ""
-        echo "IFB device: $IFB_DEV"
-        sudo tc qdisc show dev "$IFB_DEV" 2>&1 | head -5 || echo "  (none)"
+        echo "IFB device $IFB_DEV: $(get_qdisc_line "$IFB_DEV")"
     fi
 }
 
@@ -187,10 +217,8 @@ clear_limits() {
     local iface=$1
     echo "Clearing speed limits on $iface..."
 
-    if load_state; then
-        if [[ "$DIRECTION" == "down" ]]; then
-            teardown_ifb "$IFB_DEV"
-        fi
+    if load_and_check_direction; then
+        teardown_ifb "$IFB_DEV"
         teardown_interface "$iface"
     fi
 
@@ -201,27 +229,27 @@ clear_limits() {
 setup_ifb() {
     local ifb_dev=$1
 
-    run sudo modprobe ifb || die "Failed to load ifb module"
+    sudo modprobe ifb 2>/dev/null || die "Failed to load ifb module"
 
-    if ! ip link show "$ifb_dev" &>/dev/null; then
-        run sudo ip link add "$ifb_dev" type ifb || die "Failed to create $ifb_dev"
+    if ! ip link show "$ifb_dev" >/dev/null 2>&1; then
+        sudo ip link add "$ifb_dev" type ifb || die "Failed to create $ifb_dev"
     fi
-    run sudo ip link set "$ifb_dev" up || die "Failed to bring up $ifb_dev"
+    sudo ip link set "$ifb_dev" up || die "Failed to bring up $ifb_dev"
 }
 
 setup_interface() {
     local iface=$1
     local direction=$2
 
-    run_quiet sudo tc qdisc del dev "$iface" root 2>/dev/null || true
-    run sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc on $iface"
+    sudo tc qdisc del dev "$iface" root 2>/dev/null || true
+    sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc on $iface"
 
     if [[ "$direction" == "up" ]]; then
         return 0
     fi
 
-    run_quiet sudo tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null || true
-    run sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
+    sudo tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null || true
+    sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
         match u32 0 0 action mirred egress redirect dev "$IFB_DEV" || \
         die "Failed to redirect ingress traffic to IFB"
 }
@@ -236,17 +264,20 @@ set_download_limit() {
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
-    ensure_clean_state "down"
+    state_lock
+    trap 'release_state_lock' RETURN
+
+    ensure_clean_state
 
     setup_ifb "$IFB_DEV"
     setup_interface "$iface" "down"
 
-    run_quiet sudo tc qdisc del dev "$IFB_DEV" root
-    run sudo tc qdisc add dev "$IFB_DEV" root handle 1: htb || die "Failed to add qdisc on $IFB_DEV"
-    run sudo tc class add dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
-        run sudo tc class replace dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+    sudo tc qdisc del dev "$IFB_DEV" root 2>/dev/null || true
+    sudo tc qdisc add dev "$IFB_DEV" root handle 1: htb || die "Failed to add qdisc on $IFB_DEV"
+    sudo tc class add dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        sudo tc class replace dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
         die "Failed to set rate limit on IFB"
-    run_quiet sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1
+    sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 || true
 
     save_state "$iface" "down" "$speed" "$unit" "$rate_mbit"
     echo "Download limit set to $speed $unit ($rate_mbit mbit)"
@@ -262,18 +293,33 @@ set_upload_limit() {
     local rate_mbit
     rate_mbit=$(convert_to_mbit "$speed" "$unit")
 
-    ensure_clean_state "up"
+    state_lock
+    trap 'release_state_lock' RETURN
 
+    ensure_clean_state
     setup_interface "$iface" "up"
 
-    run sudo tc class add dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
-        run sudo tc class replace dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+    sudo tc class add dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
+        sudo tc class replace dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
         die "Failed to set rate limit on $iface"
-    run_quiet sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1
+    sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 || true
 
     save_state "$iface" "up" "$speed" "$unit" "$rate_mbit"
     echo "Upload limit set to $speed $unit ($rate_mbit mbit)"
 }
+
+DIRECTION=""
+UNIT=""
+SPEED=""
+INTERFACE=""
+CLEAR=0
+STATUS=0
+DEBUG=0
+
+[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage && exit 0
+
+[[ "${STATUS:-0}" -eq 1 ]] || true
+check_dependencies
 
 DIRECTION=""
 UNIT=""

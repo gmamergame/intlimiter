@@ -1,3 +1,15 @@
+intlimiter (1.1.0-1) stable; urgency=medium
+
+  * Hardened state handling and deterministic IFB behavior
+  * Fixed state load/clear behavior under concurrent or partial state
+  * Added dependency check for ip, tc, bc, sudo before applying limits
+  * Added filesystem lock for state mutations with optional disable via
+    INTLIMITER_STATE_LOCK=0
+  * Improved --clear to directly teardown qdiscs and IFB instead of
+    relying only on saved state
+
+ -- Hermes Agent <noreply@example.com>  Sat, 04 Jul 2026 00:00:00 +0000
+
 intlimiter (1.0.0) stable; urgency=medium
 
   * Initial release
