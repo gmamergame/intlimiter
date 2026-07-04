@@ -266,14 +266,14 @@ setup_interface() {
     local iface=$1
     local direction=$2
 
-    sudo tc qdisc del dev "$iface" root 2>/dev/null || true
+    sudo tc qdisc del dev "$iface" root 2>/dev/null || debug "root qdisc removal warning on $iface during setup"
     sudo tc qdisc add dev "$iface" root handle 1: htb || die "Failed to add qdisc on $iface"
 
     if [[ "$direction" == "up" ]]; then
         return 0
     fi
 
-    sudo tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null || true
+    sudo tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null || debug "ingress qdisc add warning on $iface during setup"
     sudo tc filter add dev "$iface" parent ffff: protocol ip u32 \
         match u32 0 0 action mirred egress redirect dev "$IFB_DEV" || \
         die "Failed to redirect ingress traffic to IFB"
@@ -297,12 +297,12 @@ set_download_limit() {
     setup_ifb "$IFB_DEV"
     setup_interface "$iface" "down"
 
-    sudo tc qdisc del dev "$IFB_DEV" root 2>/dev/null || true
+    sudo tc qdisc del dev "$IFB_DEV" root 2>/dev/null || debug "IFB root qdisc removal warning"
     sudo tc qdisc add dev "$IFB_DEV" root handle 1: htb || die "Failed to add qdisc on $IFB_DEV"
     sudo tc class add dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
         sudo tc class replace dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
         die "Failed to set rate limit on IFB"
-    sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 || true
+    sudo tc filter add dev "$IFB_DEV" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 || debug "IFB filter add warning, may already exist"
 
     save_state "$iface" "down" "$speed" "$unit" "$rate_mbit"
     echo "Download limit set to $speed $unit ($rate_mbit mbit)"
@@ -327,7 +327,7 @@ set_upload_limit() {
     sudo tc class add dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
         sudo tc class replace dev "$iface" parent 1: classid 1:1 htb rate "${rate_mbit}mbit" ceil "${rate_mbit}mbit" || \
         die "Failed to set rate limit on $iface"
-    sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 || true
+    sudo tc filter add dev "$iface" parent 1: protocol ip u32 match u32 0 0 flowid 1:1 || debug "upload filter add warning, may already exist"
 
     save_state "$iface" "up" "$speed" "$unit" "$rate_mbit"
     echo "Upload limit set to $speed $unit ($rate_mbit mbit)"
