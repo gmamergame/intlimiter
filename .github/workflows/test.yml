@@ -28,24 +28,28 @@ jobs:
           sudo modprobe act_mirred
           lsmod | grep -E 'ifb|htb|ingress|u32|mirred'
 
-      - name: Show available interfaces
-        run: ip link show
+      - name: Detect primary interface
+        id: detect_iface
+        run: |
+          IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+          echo "interface=$IFACE" >> $GITHUB_OUTPUT
+          echo "Detected interface: $IFACE"
 
       - name: Test download limit (--down --mbit)
         run: |
-          sudo ./intlimiter --down --mbit 100 --interface eth0
+          sudo ./intlimiter --down --mbit 100 --interface ${{ steps.detect_iface.outputs.interface }}
           sudo ./intlimiter --status
 
       - name: Test upload limit (--up --mbit)
         run: |
           sudo ./intlimiter --clear
-          sudo ./intlimiter --up --mbit 50 --interface eth0
+          sudo ./intlimiter --up --mbit 50 --interface ${{ steps.detect_iface.outputs.interface }}
           sudo ./intlimiter --status
 
       - name: Test download limit with mbyte (--down --mbyte)
         run: |
           sudo ./intlimiter --clear
-          sudo ./intlimiter --down --mbyte 10 --interface eth0
+          sudo ./intlimiter --down --mbyte 10 --interface ${{ steps.detect_iface.outputs.interface }}
           sudo ./intlimiter --status
 
       - name: Test clear limits
@@ -66,7 +70,7 @@ jobs:
       - name: Test invalid speed handling
         run: |
           set +e
-          sudo ./intlimiter --down --mbit -5 --interface eth0
+          sudo ./intlimiter --down --mbit -5 --interface ${{ steps.detect_iface.outputs.interface }}
           if [ $? -eq 0 ]; then
             echo "ERROR: Should have failed with negative speed"
             exit 1
