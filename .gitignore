@@ -1,2 +1,5 @@
 # Nothing to ignore for a simple script
 # Add here if needed
+
+# GitHub Actions workflow (keep tracked)
+!.github/workflows/

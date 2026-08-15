@@ -1,0 +1,84 @@
+name: Test intlimiter
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test on Ubuntu
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify script syntax
+        run: bash -n intlimiter
+
+      - name: Load required kernel modules
+        run: |
+          sudo modprobe ifb
+          sudo modprobe sch_htb
+          sudo modprobe sch_ingress
+          sudo modprobe cls_u32
+          sudo modprobe act_mirred
+          lsmod | grep -E 'ifb|htb|ingress|u32|mirred'
+
+      - name: Show available interfaces
+        run: ip link show
+
+      - name: Test download limit (--down --mbit)
+        run: |
+          sudo ./intlimiter --down --mbit 100 --interface eth0
+          sudo ./intlimiter --status
+
+      - name: Test upload limit (--up --mbit)
+        run: |
+          sudo ./intlimiter --clear
+          sudo ./intlimiter --up --mbit 50 --interface eth0
+          sudo ./intlimiter --status
+
+      - name: Test download limit with mbyte (--down --mbyte)
+        run: |
+          sudo ./intlimiter --clear
+          sudo ./intlimiter --down --mbyte 10 --interface eth0
+          sudo ./intlimiter --status
+
+      - name: Test clear limits
+        run: |
+          sudo ./intlimiter --clear
+          sudo ./intlimiter --status
+
+      - name: Test invalid interface handling
+        run: |
+          set +e
+          sudo ./intlimiter --down --mbit 10 --interface "nonexistent123"
+          if [ $? -eq 0 ]; then
+            echo "ERROR: Should have failed with invalid interface"
+            exit 1
+          fi
+          echo "Correctly rejected invalid interface"
+
+      - name: Test invalid speed handling
+        run: |
+          set +e
+          sudo ./intlimiter --down --mbit -5 --interface eth0
+          if [ $? -eq 0 ]; then
+            echo "ERROR: Should have failed with negative speed"
+            exit 1
+          fi
+          echo "Correctly rejected negative speed"
+
+      - name: Test help output
+        run: |
+          ./intlimiter --help
+          ./intlimiter -h
+
+      - name: Test debug mode
+        run: |
+          sudo ./intlimiter --debug --down --mbit 10 --interface eth0
+          sudo ./intlimiter --clear
