@@ -35,9 +35,21 @@ jobs:
           echo "interface=$IFACE" >> $GITHUB_OUTPUT
           echo "Detected interface: $IFACE"
 
+      - name: Debug - show interface and tc state before test
+        run: |
+          echo "=== Interface: ${{ steps.detect_iface.outputs.interface }} ==="
+          ip link show ${{ steps.detect_iface.outputs.interface }}
+          echo "=== tc qdisc before ==="
+          sudo tc qdisc show dev ${{ steps.detect_iface.outputs.interface }}
+          echo "=== IFB state before ==="
+          sudo ip link show ifb0 2>/dev/null || echo "ifb0 not present"
+          sudo tc qdisc show dev ifb0 2>/dev/null || echo "no qdisc on ifb0"
+
       - name: Test download limit (--down --mbit)
         run: |
+          set -x
           sudo ./intlimiter --down --mbit 100 --interface ${{ steps.detect_iface.outputs.interface }}
+          set +x
           sudo ./intlimiter --status
 
       - name: Test upload limit (--up --mbit)
@@ -84,5 +96,5 @@ jobs:
 
       - name: Test debug mode
         run: |
-          sudo ./intlimiter --debug --down --mbit 10 --interface eth0
+          sudo ./intlimiter --debug --down --mbit 10 --interface ${{ steps.detect_iface.outputs.interface }}
           sudo ./intlimiter --clear
