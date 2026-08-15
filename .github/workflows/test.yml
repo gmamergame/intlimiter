@@ -35,6 +35,11 @@ jobs:
           echo "interface=$IFACE" >> $GITHUB_OUTPUT
           echo "Detected interface: $IFACE"
 
+      - name: Debug - print detected interface value
+        run: |
+          echo "Interface from output: ${{ steps.detect_iface.outputs.interface }}"
+          echo "Length: ${{ steps.detect_iface.outputs.interface | length }}"
+
       - name: Debug - show interface and tc state before test
         run: |
           echo "=== Interface: ${{ steps.detect_iface.outputs.interface }} ==="
@@ -48,7 +53,7 @@ jobs:
       - name: Test download limit (--down --mbit)
         run: |
           set -x
-          sudo ./intlimiter --down --mbit 100 --interface ${{ steps.detect_iface.outputs.interface }}
+          sudo ./intlimiter --down --mbit 100 --interface "${{ steps.detect_iface.outputs.interface }}"
           set +x
           sudo ./intlimiter --status
 
